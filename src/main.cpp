@@ -1,8 +1,8 @@
 /*
  * 설명: modern-irc 실행 진입점으로 서버를 초기화한다.
- * 버전: v0.1.0
+ * 버전: v0.2.0
  * 관련 문서: design/protocol/contract.md
- * 테스트: tests/e2e/smoke_test.py
+ * 테스트: tests/e2e
  */
 #include <cstdlib>
 #include <iostream>

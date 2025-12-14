@@ -30,7 +30,7 @@ modern-irc (C++17 IRC 서버) 버전 로드맵.
   - E2E 1개(실제 소켓)
 
 ### v0.2.0 — 등록(Registration) 1차: PASS/NICK/USER
-- 상태: ⬜
+- 상태: ✅
 - 목표:
   - PASS/NICK/USER 지원
   - 등록 완료 조건 고정(순서/필수값)

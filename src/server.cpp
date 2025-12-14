@@ -1,8 +1,8 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 PING 요청에 PONG을 응답한다.
- * 버전: v0.1.0
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차 및 PING을 처리한다.
+ * 버전: v0.2.0
  * 관련 문서: design/protocol/contract.md
- * 테스트: tests/unit/framer_test.cpp, tests/e2e/smoke_test.py
+ * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
 #include "server.hpp"
 
@@ -22,13 +22,13 @@
 namespace {
 const std::size_t kMaxLineLength = 512;
 const std::size_t kMaxOutboundQueue = 64;
+const char *kServerName = "modern-irc";
 }
 
 PollServer::PollServer(int port, const std::string &password)
     : listen_fd_(-1), port_(port), password_(password) {}
 
 void PollServer::Run() {
-    static_cast<void>(password_);
     SetupListeningSocket();
     EventLoop();
 }
@@ -138,6 +138,9 @@ void PollServer::AcceptNewClients() {
         conn.fd = client_fd;
         conn.send_offset = 0;
         conn.marked_close = false;
+        conn.pass_accepted = false;
+        conn.registered = false;
+        conn.user_set = false;
 
         clients_[client_fd] = conn;
 
@@ -163,6 +166,9 @@ void PollServer::HandleClientRead(int fd) {
             for (std::size_t i = 0; i < res.lines.size(); ++i) {
                 ProcessLine(fd, res.lines[i]);
                 if (clients_.find(fd) == clients_.end()) {
+                    return;
+                }
+                if (clients_[fd].marked_close) {
                     return;
                 }
             }
@@ -203,6 +209,10 @@ void PollServer::HandleClientWrite(int fd) {
     }
 
     UpdatePollWriteInterest(fd);
+
+    if (conn.outbound_queue.empty() && conn.marked_close) {
+        CloseClient(fd);
+    }
 }
 
 void PollServer::CloseClient(int fd) {
@@ -222,28 +232,164 @@ void PollServer::CloseClient(int fd) {
 }
 
 void PollServer::ProcessLine(int fd, const std::string &line) {
-    std::string command = line;
+    protocol::ParsedMessage msg = ParseAndNormalize(line);
+    if (msg.command.empty()) {
+        return;
+    }
+    HandleCommand(fd, msg);
+}
+
+protocol::ParsedMessage PollServer::ParseAndNormalize(const std::string &line) {
+    protocol::ParsedMessage parsed = protocol::ParseMessageLine(line);
+    for (std::size_t i = 0; i < parsed.command.size(); ++i) {
+        parsed.command[i] = static_cast<char>(std::toupper(parsed.command[i]));
+    }
+    return parsed;
+}
+
+void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
+    if (msg.command == "PING") {
+        HandlePing(fd, msg);
+        return;
+    }
+    if (msg.command == "PASS") {
+        HandlePass(fd, msg);
+        return;
+    }
+    if (msg.command == "NICK") {
+        HandleNick(fd, msg);
+        return;
+    }
+    if (msg.command == "USER") {
+        HandleUser(fd, msg);
+        return;
+    }
+    if (msg.command == "QUIT") {
+        HandleQuit(fd);
+        return;
+    }
+
+    if (!clients_[fd].registered) {
+        SendNumeric(fd, "451", clients_[fd].nick.empty() ? "*" : clients_[fd].nick,
+                    ":등록 필요");
+        return;
+    }
+}
+
+void PollServer::HandlePing(int fd, const protocol::ParsedMessage &msg) {
     std::string payload;
+    if (!msg.params.empty()) {
+        payload = msg.params[0];
+    }
+    std::string response = "PONG";
+    if (!payload.empty()) {
+        response += " " + payload;
+    }
+    if (!EnqueueResponse(fd, response)) {
+        CloseClient(fd);
+    }
+}
 
-    std::size_t space = line.find(' ');
-    if (space != std::string::npos) {
-        command = line.substr(0, space);
-        payload = line.substr(space + 1);
+void PollServer::HandlePass(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    if (conn.registered) {
+        SendNumeric(fd, "462", conn.nick.empty() ? "*" : conn.nick, ":이미 등록됨");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "461", conn.nick.empty() ? "*" : conn.nick,
+                    "PASS :필수 파라미터 부족", true);
+        return;
+    }
+    if (msg.params[0] != password_) {
+        SendNumeric(fd, "464", conn.nick.empty() ? "*" : conn.nick,
+                    ":비밀번호 불일치", true);
+        return;
+    }
+    conn.pass_accepted = true;
+    TryCompleteRegistration(fd);
+}
+
+void PollServer::HandleNick(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    if (conn.registered) {
+        SendNumeric(fd, "462", conn.nick.empty() ? "*" : conn.nick, "이미 등록됨");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "431", conn.nick.empty() ? "*" : conn.nick, ":닉네임 없음");
+        return;
+    }
+    const std::string &new_nick = msg.params[0];
+    if (!protocol::IsValidNickname(new_nick)) {
+        SendNumeric(fd, "432", conn.nick.empty() ? "*" : conn.nick,
+                    new_nick + " :닉네임 형식 오류");
+        return;
+    }
+    if (NickInUse(new_nick, fd)) {
+        SendNumeric(fd, "433", conn.nick.empty() ? "*" : conn.nick,
+                    new_nick + " :닉네임 사용 중");
+        return;
     }
 
-    for (std::size_t i = 0; i < command.size(); ++i) {
-        command[i] = static_cast<char>(std::toupper(command[i]));
-    }
+    conn.nick = new_nick;
+    TryCompleteRegistration(fd);
+}
 
-    if (command == "PING") {
-        std::string response = "PONG";
-        if (!payload.empty()) {
-            response += " " + payload;
+void PollServer::HandleUser(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    if (conn.registered) {
+        SendNumeric(fd, "462", conn.nick.empty() ? "*" : conn.nick, ":이미 등록됨");
+        return;
+    }
+    if (msg.params.size() < 4) {
+        SendNumeric(fd, "461", conn.nick.empty() ? "*" : conn.nick,
+                    "USER :필수 파라미터 부족");
+        return;
+    }
+    conn.username = msg.params[0];
+    conn.realname = msg.params[3];
+    conn.user_set = true;
+    TryCompleteRegistration(fd);
+}
+
+void PollServer::HandleQuit(int fd) { CloseClient(fd); }
+
+void PollServer::SendNumeric(int fd, const std::string &code, const std::string &target,
+                             const std::string &message, bool close_after) {
+    std::string line = std::string(":") + kServerName + " " + code + " " + target + " " + message;
+    if (!EnqueueResponse(fd, line)) {
+        CloseClient(fd);
+        return;
+    }
+    if (close_after) {
+        clients_[fd].marked_close = true;
+    }
+}
+
+bool PollServer::NickInUse(const std::string &nick, int requester_fd) const {
+    for (std::map<int, ClientConnection>::const_iterator it = clients_.begin(); it != clients_.end();
+         ++it) {
+        if (it->first == requester_fd) {
+            continue;
         }
-        if (!EnqueueResponse(fd, response)) {
-            CloseClient(fd);
+        if (it->second.nick == nick) {
+            return true;
         }
     }
+    return false;
+}
+
+void PollServer::TryCompleteRegistration(int fd) {
+    ClientConnection &conn = clients_[fd];
+    if (conn.registered) {
+        return;
+    }
+    if (!conn.pass_accepted || conn.nick.empty() || !conn.user_set) {
+        return;
+    }
+    conn.registered = true;
+    SendNumeric(fd, "001", conn.nick, ":등록 완료");
 }
 
 bool PollServer::EnqueueResponse(int fd, const std::string &line) {

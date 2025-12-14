@@ -1,8 +1,8 @@
 /*
- * 설명: poll 기반 TCP 서버로 PING 요청을 처리한다.
- * 버전: v0.1.0
+ * 설명: poll 기반 TCP 서버로 등록 절차와 PING 응답을 처리한다.
+ * 버전: v0.2.0
  * 관련 문서: design/protocol/contract.md
- * 테스트: tests/unit/framer_test.cpp, tests/e2e/smoke_test.py
+ * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
 #pragma once
 
@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "protocol/framer.hpp"
+#include "protocol/message.hpp"
 
 struct ClientConnection {
     int fd;
@@ -20,6 +21,12 @@ struct ClientConnection {
     std::deque<std::string> outbound_queue;
     std::size_t send_offset;
     bool marked_close;
+    bool pass_accepted;
+    bool registered;
+    bool user_set;
+    std::string nick;
+    std::string username;
+    std::string realname;
 };
 
 class PollServer {
@@ -38,6 +45,17 @@ class PollServer {
     void ProcessLine(int fd, const std::string &line);
     bool EnqueueResponse(int fd, const std::string &line);
     void UpdatePollWriteInterest(int fd);
+    protocol::ParsedMessage ParseAndNormalize(const std::string &line);
+    void HandleCommand(int fd, const protocol::ParsedMessage &msg);
+    void HandlePing(int fd, const protocol::ParsedMessage &msg);
+    void HandlePass(int fd, const protocol::ParsedMessage &msg);
+    void HandleNick(int fd, const protocol::ParsedMessage &msg);
+    void HandleUser(int fd, const protocol::ParsedMessage &msg);
+    void HandleQuit(int fd);
+    void SendNumeric(int fd, const std::string &code, const std::string &target,
+                     const std::string &message, bool close_after = false);
+    bool NickInUse(const std::string &nick, int requester_fd) const;
+    void TryCompleteRegistration(int fd);
 
     int listen_fd_;
     int port_;
