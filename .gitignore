@@ -1,0 +1,3 @@
+modern-irc
+tests/unit/framer_test
+*.o
