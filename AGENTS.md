@@ -70,6 +70,13 @@ Agents MUST follow STACK_DESIGN.md.
 Every change set MUST target exactly one version from VERSIONING.md.
 - Do not mix v0.2.0 + v0.3.0 in one change set.
 
+### 2.6 CI gate (MANDATORY from v0.1.0)
+- From v0.1.0, the repository MUST include:
+  - `./verify.sh` (single entrypoint for build + tests)
+  - GitHub Actions workflow that runs `./verify.sh` on push/PR
+- Any change that makes CI fail is invalid.
+- Local reproduction MUST be: `./verify.sh`
+
 ---
 
 ## 3) External contract policy (MANDATORY)
@@ -117,7 +124,7 @@ Integration/E2E tests MUST validate:
    - update design/protocol/contract.md first
 4) Implement (Korean comments)
 5) Add/update tests (unit + integration/E2E)
-6) Run tests and fix until green
+6) Run `./verify.sh` and fix until green (v0.1.0+)
 7) Generate/update docs (Korean):
    - CLONE_GUIDE.md
    - design/**
