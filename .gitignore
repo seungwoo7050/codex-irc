@@ -1,3 +1,5 @@
 modern-irc
 tests/unit/framer_test
+tests/unit/message_test
+__pycache__/
 *.o

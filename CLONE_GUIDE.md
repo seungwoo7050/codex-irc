@@ -37,6 +37,15 @@ PING hello
 ```
 - 서버 응답: `PONG hello` (CRLF 포함)
 
+### 4) 등록/접속 예시
+```bash
+nc localhost 6667
+PASS testpass
+NICK hero
+USER user 0 * :Real User
+```
+- 순서와 무관하게 PASS/NICK/USER를 모두 보내면 `:modern-irc 001 hero :등록 완료` 응답이 돌아오면 성공이다.
+
 ---
 
 ## 테스트 실행
