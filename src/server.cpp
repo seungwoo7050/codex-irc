@@ -1,6 +1,6 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징 및 기본 에러 응답을 처리한다.
- * 버전: v0.5.0
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE) 에러 응답을 처리한다.
+ * 버전: v0.6.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
@@ -285,6 +285,18 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
         HandlePrivmsgNotice(fd, msg, true);
         return;
     }
+    if (msg.command == "TOPIC") {
+        HandleTopic(fd, msg);
+        return;
+    }
+    if (msg.command == "KICK") {
+        HandleKick(fd, msg);
+        return;
+    }
+    if (msg.command == "INVITE") {
+        HandleInvite(fd, msg);
+        return;
+    }
     if (msg.command == "NAMES") {
         HandleNames(fd, msg);
         return;
@@ -415,8 +427,13 @@ void PollServer::HandleJoin(int fd, const protocol::ParsedMessage &msg) {
     }
 
     ChannelState &state = channels_[channel];
+    bool was_empty = state.members.empty();
     state.members.insert(fd);
+    state.invited.erase(conn.nick);
     conn.joined_channels.insert(channel);
+    if (was_empty || state.operators.empty()) {
+        state.operators.insert(fd);
+    }
 
     std::string line = BuildUserPrefix(fd) + " JOIN " + channel;
     BroadcastToChannel(channel, line);
@@ -450,11 +467,7 @@ void PollServer::HandlePart(int fd, const protocol::ParsedMessage &msg) {
     std::string line = BuildUserPrefix(fd) + " PART " + channel + " :" + reason;
     BroadcastToChannel(channel, line);
 
-    it->second.members.erase(fd);
-    conn.joined_channels.erase(channel);
-    if (it->second.members.empty()) {
-        channels_.erase(it);
-    }
+    DetachClientFromChannel(fd, channel);
 }
 
 void PollServer::HandlePrivmsgNotice(int fd, const protocol::ParsedMessage &msg, bool notice) {
@@ -559,9 +572,151 @@ void PollServer::HandleList(int fd, const protocol::ParsedMessage &msg) {
     for (std::map<std::string, ChannelState>::const_iterator it = channels_.begin();
          it != channels_.end(); ++it) {
         const std::string count = std::to_string(it->second.members.size());
-        SendNumeric(fd, "322", nick, it->first + " " + count + " :-");
+        const std::string topic = it->second.has_topic ? it->second.topic : "-";
+        SendNumeric(fd, "322", nick, it->first + " " + count + " :" + topic);
     }
     SendNumeric(fd, "323", nick, ":LIST 종료");
+}
+
+void PollServer::HandleTopic(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "461", nick, "TOPIC :필수 파라미터 부족");
+        return;
+    }
+    const std::string &channel = msg.params[0];
+    if (!IsValidChannelName(channel)) {
+        SendNumeric(fd, "476", nick, channel + " :채널 이름 오류");
+        return;
+    }
+    std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
+    if (it == channels_.end()) {
+        SendNumeric(fd, "403", nick, channel + " :채널 없음");
+        return;
+    }
+    ChannelState &state = it->second;
+    if (state.members.find(fd) == state.members.end()) {
+        SendNumeric(fd, "442", nick, channel + " :채널에 속해 있지 않음");
+        return;
+    }
+
+    if (msg.params.size() < 2) {
+        if (!state.has_topic) {
+            SendNumeric(fd, "331", nick, channel + " :토픽 없음");
+        } else {
+            SendNumeric(fd, "332", nick, channel + " :" + state.topic);
+        }
+        return;
+    }
+
+    if (!IsChannelOperator(state, fd)) {
+        SendNumeric(fd, "482", nick, channel + " :채널 권한 없음");
+        return;
+    }
+
+    state.topic = msg.params[1];
+    state.has_topic = true;
+    std::string line = BuildUserPrefix(fd) + " TOPIC " + channel + " :" + state.topic;
+    BroadcastToChannel(channel, line);
+}
+
+void PollServer::HandleKick(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.size() < 2) {
+        SendNumeric(fd, "461", nick, "KICK :필수 파라미터 부족");
+        return;
+    }
+    const std::string &channel = msg.params[0];
+    const std::string &target_nick = msg.params[1];
+    if (!IsValidChannelName(channel)) {
+        SendNumeric(fd, "476", nick, channel + " :채널 이름 오류");
+        return;
+    }
+    std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
+    if (it == channels_.end()) {
+        SendNumeric(fd, "403", nick, channel + " :채널 없음");
+        return;
+    }
+    ChannelState &state = it->second;
+    if (state.members.find(fd) == state.members.end()) {
+        SendNumeric(fd, "442", nick, channel + " :채널에 속해 있지 않음");
+        return;
+    }
+    if (!IsChannelOperator(state, fd)) {
+        SendNumeric(fd, "482", nick, channel + " :채널 권한 없음");
+        return;
+    }
+    int target_fd = FindClientFdByNick(target_nick);
+    if (target_fd < 0 || state.members.find(target_fd) == state.members.end()) {
+        SendNumeric(fd, "441", nick, target_nick + " " + channel + " :대상이 채널에 없음");
+        return;
+    }
+
+    std::string comment = msg.params.size() >= 3 ? msg.params[2] : "강퇴됨";
+    std::string line = BuildUserPrefix(fd) + " KICK " + channel + " " + target_nick +
+                       " :" + comment;
+    BroadcastToChannel(channel, line);
+    DetachClientFromChannel(target_fd, channel);
+}
+
+void PollServer::HandleInvite(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.size() < 2) {
+        SendNumeric(fd, "461", nick, "INVITE :필수 파라미터 부족");
+        return;
+    }
+    const std::string &target_nick = msg.params[0];
+    const std::string &channel = msg.params[1];
+    if (!IsValidChannelName(channel)) {
+        SendNumeric(fd, "476", nick, channel + " :채널 이름 오류");
+        return;
+    }
+    std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
+    if (it == channels_.end()) {
+        SendNumeric(fd, "403", nick, channel + " :채널 없음");
+        return;
+    }
+    ChannelState &state = it->second;
+    if (state.members.find(fd) == state.members.end()) {
+        SendNumeric(fd, "442", nick, channel + " :채널에 속해 있지 않음");
+        return;
+    }
+    if (!IsChannelOperator(state, fd)) {
+        SendNumeric(fd, "482", nick, channel + " :채널 권한 없음");
+        return;
+    }
+    int target_fd = FindClientFdByNick(target_nick);
+    if (target_fd >= 0 && state.members.find(target_fd) != state.members.end()) {
+        SendNumeric(fd, "443", nick, target_nick + " " + channel + " :이미 채널에 있음");
+        return;
+    }
+
+    if (target_fd < 0) {
+        SendNumeric(fd, "401", nick, target_nick + " :대상 없음");
+        return;
+    }
+
+    state.invited.insert(target_nick);
+    SendNumeric(fd, "341", nick, target_nick + " " + channel);
+    std::string line = BuildUserPrefix(fd) + " INVITE " + target_nick + " " + channel;
+    if (!EnqueueResponse(target_fd, line)) {
+        CloseClient(target_fd);
+    }
 }
 
 void PollServer::HandleQuit(int fd) { CloseClient(fd); }
@@ -680,11 +835,7 @@ void PollServer::RemoveFromAllChannels(int fd, const std::string &reason) {
         }
         std::string line = BuildUserPrefix(fd) + " PART " + channel + " :" + reason;
         BroadcastToChannel(channel, line);
-        chan_it->second.members.erase(fd);
-        conn.joined_channels.erase(channel);
-        if (chan_it->second.members.empty()) {
-            channels_.erase(chan_it);
-        }
+        DetachClientFromChannel(fd, channel);
     }
 }
 
@@ -709,6 +860,43 @@ void PollServer::UpdatePollWriteInterest(int fd) {
             return;
         }
     }
+}
+
+void PollServer::DetachClientFromChannel(int fd, const std::string &channel) {
+    std::map<std::string, ChannelState>::iterator chan_it = channels_.find(channel);
+    if (chan_it == channels_.end()) {
+        return;
+    }
+    ChannelState &state = chan_it->second;
+    state.members.erase(fd);
+    state.operators.erase(fd);
+
+    std::map<int, ClientConnection>::iterator client_it = clients_.find(fd);
+    if (client_it != clients_.end()) {
+        state.invited.erase(client_it->second.nick);
+        client_it->second.joined_channels.erase(channel);
+    }
+
+    if (state.members.empty()) {
+        channels_.erase(chan_it);
+        return;
+    }
+    PromoteOperatorIfNeeded(state);
+}
+
+void PollServer::PromoteOperatorIfNeeded(ChannelState &state) {
+    if (state.members.empty()) {
+        return;
+    }
+    if (!state.operators.empty()) {
+        return;
+    }
+    int promote_fd = *state.members.begin();
+    state.operators.insert(promote_fd);
+}
+
+bool PollServer::IsChannelOperator(const ChannelState &state, int fd) const {
+    return state.operators.find(fd) != state.operators.end();
 }
 
 std::string PollServer::FormatPayloadForEcho(const std::string &payload) const {
