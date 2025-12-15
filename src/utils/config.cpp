@@ -1,7 +1,7 @@
 /*
  * 설명: INI 파일을 파싱해 서버 설정을 생성하고 검증한다.
- * 버전: v0.8.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.8.0-config-logging.md
+ * 버전: v0.9.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.8.0-config-logging.md, design/server/v0.9.0-defensive.md
  * 테스트: tests/unit/config_parser_test.cpp
  */
 #include "utils/config.hpp"
@@ -72,7 +72,8 @@ bool ParsePositiveNumber(const std::string &raw, std::size_t &out) {
 
 namespace config {
 
-Settings::Settings() : server_name("modern-irc"), log_level(LogLevel::kInfo), messages_per_5s(0) {}
+Settings::Settings()
+    : server_name("modern-irc"), log_level(LogLevel::kInfo), messages_per_5s(0), outbound_lines(16) {}
 
 bool LoadFromFile(const std::string &path, Settings &out, std::string &error) {
     Settings defaults;
@@ -155,6 +156,15 @@ bool LoadFromFile(const std::string &path, Settings &out, std::string &error) {
                 return false;
             }
             out.messages_per_5s = number;
+        } else if (section == "limits" && key == "outbound_lines") {
+            std::size_t number = 0;
+            if (!ParsePositiveNumber(value, number)) {
+                std::ostringstream oss;
+                oss << "limits.outbound_lines 오류 (" << line_no << ")";
+                error = oss.str();
+                return false;
+            }
+            out.outbound_lines = number;
         } else {
             std::ostringstream oss;
             oss << "알 수 없는 섹션/키 (" << line_no << ")";

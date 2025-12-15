@@ -1,11 +1,12 @@
 /*
- * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징/채널 관리(TOPIC/KICK/INVITE/MODE) 라우팅과 설정 리로드를 처리한다.
- * 버전: v0.8.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md
+ * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징/채널 관리(TOPIC/KICK/INVITE/MODE) 라우팅과 설정 리로드, 레이트리밋을 처리한다.
+ * 버전: v0.9.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md, design/server/v0.9.0-defensive.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/unit/config_parser_test.cpp, tests/e2e
  */
 #pragma once
 
+#include <chrono>
 #include <deque>
 #include <map>
 #include <poll.h>
@@ -31,6 +32,9 @@ struct ClientConnection {
     std::string username;
     std::string realname;
     std::set<std::string> joined_channels;
+    std::size_t enqueues_since_last_write;
+    std::deque<std::chrono::steady_clock::time_point> recent_messages;
+    std::deque<std::chrono::steady_clock::time_point> recent_outbound;
 };
 
 struct ChannelState {
@@ -104,6 +108,7 @@ class PollServer {
     void ApplyConfig(const config::Settings &settings);
     bool ReloadConfig(std::string &error);
     void HandlePendingReload();
+    bool ConsumeRateLimitToken(int fd);
 
     int listen_fd_;
     int port_;
@@ -115,6 +120,8 @@ class PollServer {
     config::Settings config_;
     std::string config_path_;
     Logger logger_;
+
+    std::size_t max_outbound_queue_;
 
     std::string FormatPayloadForEcho(const std::string &payload) const;
 };

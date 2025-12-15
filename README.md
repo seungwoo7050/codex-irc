@@ -2,7 +2,7 @@
 
 C++17로 작성된 단일 스레드 IRC 서버 예제다. `poll()` 기반 이벤트 루프를 사용해 다중 클라이언트를 처리하며, 버전별로 기능을 확장한다. 외부 계약은 `design/protocol/contract.md`에 기록된다.
 
-## v0.8.0 상태
+## v0.9.0 상태
 - CRLF 프레이밍과 512바이트 길이 제한을 강제하며 초과 시 연결을 종료한다.
 - RFC 스타일 파서를 사용해 prefix/command/params(trailing 포함)을 분리한다.
 - 지원 명령: `PASS`, `NICK`, `USER`, `PING`, `PONG`, `QUIT`, `JOIN`, `PART`, `PRIVMSG`, `NOTICE`, `NAMES`, `LIST`, `TOPIC`, `KICK`, `INVITE`, `MODE`
@@ -16,8 +16,10 @@ C++17로 작성된 단일 스레드 IRC 서버 예제다. `poll()` 기반 이벤
 - JOIN 성공 시 `:<nick>!<user>@modern-irc JOIN <channel>`를 채널 구성원 전체에 브로드캐스트하며, PART/QUIT/연결 종료 시에도 PART 브로드캐스트로 멤버십을 정리한다.
 - 채널 관리: 첫 JOIN 사용자가 오퍼레이터가 되며, 오퍼레이터만 TOPIC 설정/INVITE/KICK을 할 수 있다. KICK은 채널 전체에 브로드캐스트되고 INVITE는 `341` 확인과 함께 초대 대상에게 전달된다. 토픽은 설정되면 TOPIC 조회 시 `332`로 응답하며 LIST의 토픽 필드에도 반영된다.
 - 채널 모드: MODE 명령으로 +i/+t/+k/+o/+l을 적용·해제한다. +k는 키를 요구하고 +l은 인원 제한을 설정하며, +i는 초대 목록 외 사용자의 JOIN을 `473`으로 거부한다. 모드 변경은 오퍼레이터만 가능하고, 현재 모드는 `324`로 조회할 수 있다.
-- 설정: `./modern-irc <port> <password> [config_path]`로 기동하며, INI 설정에서 서버명(`server.name`), 로그 레벨/파일(`logging.level`/`logging.file`), 레이트리밋 값(`limits.messages_per_5s`, 로드만 함)을 지정할 수 있다.
+- 설정: `./modern-irc <port> <password> [config_path]`로 기동하며, INI 설정에서 서버명(`server.name`), 로그 레벨/파일(`logging.level`/`logging.file`), 레이트리밋 값(`limits.messages_per_5s`)을 지정할 수 있다.
 - REHASH: 등록된 사용자가 `REHASH`를 호출하거나 프로세스가 SIGHUP을 받으면 설정 파일을 다시 읽고 서버명/로그 설정을 즉시 갱신한다. 성공 시 `382`, 실패 시 `468` numeric을 반환한다.
+- 레이트리밋: `[limits] messages_per_5s`가 0보다 크면 5초 윈도우당 해당 횟수만큼 PRIVMSG/NOTICE를 허용하며, 초과 시 `439 ERR_RATEEXCEEDED`로 드롭한다.
+- 백프레셔: 각 클라이언트 송신 큐는 기본 16라인 상한을 가지며(`limits.outbound_lines`로 조정 가능), 초과 시 경고 로그를 남기고 해당 연결을 종료한다.
 
 ## 빌드/테스트
 자세한 절차는 `CLONE_GUIDE.md`와 `verify.sh`를 참고한다.
