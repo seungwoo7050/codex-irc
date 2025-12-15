@@ -1,6 +1,6 @@
 /*
- * 설명: IRC 라인을 명령/파라미터로 파싱하고 닉네임을 검증한다.
- * 버전: v0.2.0
+ * 설명: IRC 라인을 RFC 문법에 맞춰 prefix/command/params로 분리하고 닉네임을 검증한다.
+ * 버전: v0.3.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/message_test.cpp
  */
@@ -21,6 +21,7 @@ ParsedMessage ParseMessageLine(const std::string &line) {
         if (space == std::string::npos) {
             return msg;
         }
+        msg.prefix = line.substr(1, space - 1);
         idx = space + 1;
         while (idx < line.size() && line[idx] == ' ') {
             ++idx;

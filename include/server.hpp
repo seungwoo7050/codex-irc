@@ -1,6 +1,6 @@
 /*
- * 설명: poll 기반 TCP 서버로 등록 절차와 PING 응답을 처리한다.
- * 버전: v0.2.0
+ * 설명: poll 기반 TCP 서버로 등록 절차와 PING/PONG/QUIT 및 에러 응답을 처리한다.
+ * 버전: v0.3.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
@@ -48,6 +48,7 @@ class PollServer {
     protocol::ParsedMessage ParseAndNormalize(const std::string &line);
     void HandleCommand(int fd, const protocol::ParsedMessage &msg);
     void HandlePing(int fd, const protocol::ParsedMessage &msg);
+    void HandlePong(int fd, const protocol::ParsedMessage &msg);
     void HandlePass(int fd, const protocol::ParsedMessage &msg);
     void HandleNick(int fd, const protocol::ParsedMessage &msg);
     void HandleUser(int fd, const protocol::ParsedMessage &msg);
@@ -62,5 +63,7 @@ class PollServer {
     std::string password_;
     std::vector<struct pollfd> poll_fds_;
     std::map<int, ClientConnection> clients_;
+
+    std::string FormatPayloadForEcho(const std::string &payload) const;
 };
 
