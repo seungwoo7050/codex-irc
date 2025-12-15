@@ -1,7 +1,7 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE/MODE), 설정 리로드를 처리한다.
- * 버전: v0.8.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE/MODE), 설정 리로드, 레이트리밋을 처리한다.
+ * 버전: v0.9.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md, design/server/v0.9.0-defensive.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/unit/config_parser_test.cpp, tests/e2e
  */
 #include "server.hpp"
@@ -17,11 +17,14 @@
 #include <cctype>
 #include <cerrno>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 
 namespace {
 const std::size_t kMaxLineLength = 512;
-const std::size_t kMaxOutboundQueue = 64;
+const std::size_t kMaxWritesPerTick = 1;
+const std::chrono::seconds kRateWindow(5);
+const std::chrono::seconds kOutboundWindow(5);
 volatile std::sig_atomic_t g_reload_requested = 0;
 
 void HandleSighup(int) { g_reload_requested = 1; }
@@ -29,7 +32,8 @@ void HandleSighup(int) { g_reload_requested = 1; }
 
 PollServer::PollServer(int port, const std::string &password, const config::Settings &settings,
                        const std::string &config_path)
-    : listen_fd_(-1), port_(port), password_(password), config_path_(config_path) {
+    : listen_fd_(-1), port_(port), password_(password), config_path_(config_path),
+      max_outbound_queue_(settings.outbound_lines) {
     ApplyConfig(settings);
 }
 
@@ -144,6 +148,9 @@ void PollServer::AcceptNewClients() {
             fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
         }
 
+        int sndbuf = 64;
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
         ClientConnection conn;
         conn.fd = client_fd;
         conn.send_offset = 0;
@@ -151,6 +158,7 @@ void PollServer::AcceptNewClients() {
         conn.pass_accepted = false;
         conn.registered = false;
         conn.user_set = false;
+        conn.enqueues_since_last_write = 0;
 
         clients_[client_fd] = conn;
 
@@ -197,19 +205,22 @@ void PollServer::HandleClientRead(int fd) {
 
 void PollServer::HandleClientWrite(int fd) {
     ClientConnection &conn = clients_[fd];
-    while (!conn.outbound_queue.empty()) {
+    std::size_t writes = 0;
+    while (!conn.outbound_queue.empty() && writes < kMaxWritesPerTick) {
         std::string &front = conn.outbound_queue.front();
         const char *data = front.c_str() + conn.send_offset;
         std::size_t remaining = front.size() - conn.send_offset;
 
         ssize_t n = send(fd, data, remaining, 0);
-        if (n > 0) {
-            conn.send_offset += static_cast<std::size_t>(n);
-            if (conn.send_offset >= front.size()) {
-                conn.outbound_queue.pop_front();
-                conn.send_offset = 0;
-            }
-        } else {
+            if (n > 0) {
+                conn.send_offset += static_cast<std::size_t>(n);
+                if (conn.send_offset >= front.size()) {
+                    conn.outbound_queue.pop_front();
+                    conn.send_offset = 0;
+                    conn.enqueues_since_last_write = 0;
+                    ++writes;
+                }
+            } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
             }
@@ -520,6 +531,10 @@ void PollServer::HandlePrivmsgNotice(int fd, const protocol::ParsedMessage &msg,
     }
     if (msg.params.size() < 2 || msg.params[1].empty()) {
         SendNumeric(fd, "412", nick, ":본문 없음");
+        return;
+    }
+    if (!ConsumeRateLimitToken(fd)) {
+        SendNumeric(fd, "439", nick, ":발송 속도 초과");
         return;
     }
 
@@ -943,6 +958,25 @@ int PollServer::FindClientFdByNick(const std::string &nick) const {
     return -1;
 }
 
+bool PollServer::ConsumeRateLimitToken(int fd) {
+    if (config_.messages_per_5s == 0) {
+        return true;
+    }
+
+    ClientConnection &conn = clients_[fd];
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::time_point cutoff = now - kRateWindow;
+    while (!conn.recent_messages.empty() && conn.recent_messages.front() < cutoff) {
+        conn.recent_messages.pop_front();
+    }
+
+    if (conn.recent_messages.size() >= config_.messages_per_5s) {
+        return false;
+    }
+    conn.recent_messages.push_back(now);
+    return true;
+}
+
 void PollServer::TryCompleteRegistration(int fd) {
     ClientConnection &conn = clients_[fd];
     if (conn.registered) {
@@ -1025,10 +1059,27 @@ void PollServer::RemoveFromAllChannels(int fd, const std::string &reason) {
 
 bool PollServer::EnqueueResponse(int fd, const std::string &line) {
     ClientConnection &conn = clients_[fd];
-    if (conn.outbound_queue.size() >= kMaxOutboundQueue) {
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    while (!conn.recent_outbound.empty() && conn.recent_outbound.front() < now - kOutboundWindow) {
+        conn.recent_outbound.pop_front();
+    }
+    if (conn.recent_outbound.size() >= max_outbound_queue_) {
+        std::ostringstream oss;
+        oss << "송신 큐 초과: fd=" << fd << " nick="
+            << (conn.nick.empty() ? "*" : conn.nick);
+        logger_.Log(config::LogLevel::kWarn, oss.str());
+        return false;
+    }
+    if (conn.enqueues_since_last_write >= max_outbound_queue_) {
+        std::ostringstream oss;
+        oss << "송신 큐 초과: fd=" << fd << " nick="
+            << (conn.nick.empty() ? "*" : conn.nick);
+        logger_.Log(config::LogLevel::kWarn, oss.str());
         return false;
     }
     conn.outbound_queue.push_back(line + "\r\n");
+    ++conn.enqueues_since_last_write;
+    conn.recent_outbound.push_back(now);
     UpdatePollWriteInterest(fd);
     return true;
 }
@@ -1149,6 +1200,7 @@ void PollServer::ApplyConfig(const config::Settings &settings) {
     config_ = settings;
     logger_.SetLevel(config_.log_level);
     logger_.SetOutput(config_.log_file);
+    max_outbound_queue_ = config_.outbound_lines > 0 ? config_.outbound_lines : 1;
 }
 
 bool PollServer::ReloadConfig(std::string &error) {

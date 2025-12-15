@@ -1,7 +1,7 @@
 /*
  * 설명: INI 설정 파서가 기본값과 사용자 지정 값을 올바르게 해석하는지 확인한다.
- * 버전: v0.8.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.8.0-config-logging.md
+ * 버전: v0.9.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.8.0-config-logging.md, design/server/v0.9.0-defensive.md
  * 테스트: 이 파일 자체
  */
 #include "utils/config.hpp"
@@ -21,6 +21,7 @@ void TestDefaultsWhenFileMissing() {
     assert(settings.log_level == config::LogLevel::kInfo);
     assert(settings.log_file.empty());
     assert(settings.messages_per_5s == 0);
+    assert(settings.outbound_lines == 16);
 }
 
 void TestParseCustomValues() {
@@ -33,6 +34,7 @@ void TestParseCustomValues() {
     file << "file=logs/server.log\n";
     file << "[limits]\n";
     file << "messages_per_5s=15\n";
+    file << "outbound_lines=10\n";
     file.close();
 
     config::Settings settings;
@@ -44,6 +46,7 @@ void TestParseCustomValues() {
     assert(settings.log_level == config::LogLevel::kWarn);
     assert(settings.log_file == "logs/server.log");
     assert(settings.messages_per_5s == 15);
+    assert(settings.outbound_lines == 10);
 
     std::remove(path.c_str());
 }
