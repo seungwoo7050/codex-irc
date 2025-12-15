@@ -1,8 +1,8 @@
 # design/protocol/contract.md
 
-## 개요 (v0.5.0)
+## 개요 (v0.6.0)
 - 본 문서는 modern-irc 서버의 외부 프로토콜 계약을 정의한다.
-- v0.5.0은 RFC 스타일 메시지 파싱 규칙, PING/PONG/QUIT 흐름과 채널 JOIN/PART 브로드캐스트에 더해, 사용자/채널 메시징(PRIVMSG/NOTICE)과 채널 정보 조회(NAMES/LIST)를 고정한다.
+- v0.6.0에서는 채널 관리 명령(TOPIC/KICK/INVITE)과 채널 오퍼레이터 권한 모델(최소 권한 기준)을 고정한다.
 
 ---
 
@@ -125,7 +125,7 @@
   - 문법: `LIST` (v0.5.0에서는 파라미터 없는 전체 목록만 지원)
   - 응답:
     - 시작: `:modern-irc 321 <nick> Channel :Users Name`.
-    - 각 채널: `:modern-irc 322 <nick> <channel> <usercount> :<topic>` (topic은 아직 없으므로 `-` 고정).
+    - 각 채널: `:modern-irc 322 <nick> <channel> <usercount> :<topic>` (토픽이 없으면 `-`를 보낸다).
     - 종료: `:modern-irc 323 <nick> :LIST 종료`.
 
 ---
@@ -204,6 +204,56 @@
 - 323 RPL_LISTEND – LIST 종료
 - 353 RPL_NAMREPLY – NAMES 결과
 - 366 RPL_ENDOFNAMES – NAMES 종료
+
+---
+
+## 채널 관리 및 권한 (v0.6.0)
+- **오퍼레이터 부여 규칙**
+  - 채널이 생성될 때 최초로 JOIN한 사용자가 해당 채널의 오퍼레이터가 된다.
+  - 오퍼레이터가 떠나거나 KICK될 경우, 채널에 남은 첫 번째 멤버를 하나 선택해 즉시 오퍼레이터로 승격한다(채널이 비면 삭제된다).
+
+- **TOPIC**
+  - 조회 문법: `TOPIC <channel>`
+    - 파라미터 없음: `461 ERR_NEEDMOREPARAMS TOPIC :필수 파라미터 부족`
+    - 채널 이름 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
+    - 채널 미존재: `403 ERR_NOSUCHCHANNEL <channel> :채널 없음`
+    - 채널 미가입: `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`
+    - 응답: 토픽이 없으면 `331 RPL_NOTOPIC <channel> :토픽 없음`, 있으면 `332 RPL_TOPIC <channel> :<topic>`
+  - 설정 문법: `TOPIC <channel> :<topic>`
+    - 파라미터 부족: `461 ERR_NEEDMOREPARAMS TOPIC :필수 파라미터 부족`
+    - 채널 미가입: `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`
+    - 권한 없음: 오퍼레이터가 아니면 `482 ERR_CHANOPRIVSNEEDED <channel> :채널 권한 없음`
+    - 성공 시: `:<nick>!<user>@modern-irc TOPIC <channel> :<topic>`을 채널 전체에 브로드캐스트한다.
+
+- **KICK**
+  - 문법: `KICK <channel> <nick> [:<comment>]`
+  - 파라미터 부족: `461 ERR_NEEDMOREPARAMS KICK :필수 파라미터 부족`
+  - 채널 이름 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
+  - 채널 미존재: `403 ERR_NOSUCHCHANNEL <channel> :채널 없음`
+  - 호출자 미가입: `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`
+  - 권한 없음: 호출자가 오퍼레이터가 아니면 `482 ERR_CHANOPRIVSNEEDED <channel> :채널 권한 없음`
+  - 대상 미가입: `441 ERR_USERNOTINCHANNEL <nick> <channel> :대상이 채널에 없음`
+  - 성공 시: `:<prefix> KICK <channel> <nick> :<comment>` 브로드캐스트 후 대상 멤버십을 제거한다. comment 없으면 `강퇴됨`을 사용한다.
+
+- **INVITE**
+  - 문법: `INVITE <nick> <channel>`
+  - 파라미터 부족: `461 ERR_NEEDMOREPARAMS INVITE :필수 파라미터 부족`
+  - 채널 이름 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
+  - 채널 미존재: `403 ERR_NOSUCHCHANNEL <channel> :채널 없음`
+  - 호출자 미가입: `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`
+  - 권한 없음: 호출자가 오퍼레이터가 아니면 `482 ERR_CHANOPRIVSNEEDED <channel> :채널 권한 없음`
+  - 대상이 이미 채널에 있을 때: `443 ERR_USERONCHANNEL <nick> <channel> :이미 채널에 있음`
+  - 성공 시 흐름:
+    - 호출자에게 `341 RPL_INVITING <nick> <channel>`을 보낸다.
+    - 대상에게 `:<prefix> INVITE <nick> <channel>`을 전송한다.
+    - 서버는 채널별 초대 목록에 대상 닉네임을 기록한다.(v0.7.0의 invite-only(+i) 대비)
+
+### v0.6.0에서 사용하는 numeric 추가 목록
+- 331 RPL_NOTOPIC – TOPIC 조회 시 토픽 없음
+- 332 RPL_TOPIC – TOPIC 조회 시 토픽 반환
+- 341 RPL_INVITING – INVITE 성공 알림
+- 441 ERR_USERNOTINCHANNEL – KICK 시 대상 미가입
+- 482 ERR_CHANOPRIVSNEEDED – 채널 오퍼레이터 권한 없음
 
 ---
 
