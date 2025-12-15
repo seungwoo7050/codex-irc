@@ -1,8 +1,8 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE/MODE) 에러 응답을 처리한다.
- * 버전: v0.7.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md
- * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE/MODE), 설정 리로드를 처리한다.
+ * 버전: v0.8.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md
+ * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/unit/config_parser_test.cpp, tests/e2e
  */
 #include "server.hpp"
 
@@ -10,25 +10,31 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <csignal>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cctype>
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <stdexcept>
 
 namespace {
 const std::size_t kMaxLineLength = 512;
 const std::size_t kMaxOutboundQueue = 64;
-const char *kServerName = "modern-irc";
+volatile std::sig_atomic_t g_reload_requested = 0;
+
+void HandleSighup(int) { g_reload_requested = 1; }
 }
 
-PollServer::PollServer(int port, const std::string &password)
-    : listen_fd_(-1), port_(port), password_(password) {}
+PollServer::PollServer(int port, const std::string &password, const config::Settings &settings,
+                       const std::string &config_path)
+    : listen_fd_(-1), port_(port), password_(password), config_path_(config_path) {
+    ApplyConfig(settings);
+}
 
 void PollServer::Run() {
+    std::signal(SIGHUP, HandleSighup);
     SetupListeningSocket();
     EventLoop();
 }
@@ -68,9 +74,12 @@ void PollServer::SetupListeningSocket() {
 
 void PollServer::EventLoop() {
     while (true) {
+        HandlePendingReload();
+
         int ret = poll(poll_fds_.data(), poll_fds_.size(), -1);
         if (ret < 0) {
             if (errno == EINTR) {
+                HandlePendingReload();
                 continue;
             }
             throw std::runtime_error("poll 실패");
@@ -125,7 +134,8 @@ void PollServer::AcceptNewClients() {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
             }
-            std::cerr << "accept 실패: " << std::strerror(errno) << "\n";
+            logger_.Log(config::LogLevel::kWarn,
+                        std::string("accept 실패: ") + std::strerror(errno));
             break;
         }
 
@@ -299,6 +309,10 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
     }
     if (msg.command == "MODE") {
         HandleMode(fd, msg);
+        return;
+    }
+    if (msg.command == "REHASH") {
+        HandleRehash(fd);
         return;
     }
     if (msg.command == "NAMES") {
@@ -892,7 +906,8 @@ void PollServer::HandleQuit(int fd) { CloseClient(fd); }
 
 void PollServer::SendNumeric(int fd, const std::string &code, const std::string &target,
                              const std::string &message, bool close_after) {
-    std::string line = std::string(":") + kServerName + " " + code + " " + target + " " + message;
+    std::string line = std::string(":") + config_.server_name + " " + code + " " + target +
+                       " " + message;
     if (!EnqueueResponse(fd, line)) {
         CloseClient(fd);
         return;
@@ -969,7 +984,7 @@ std::string PollServer::BuildUserPrefix(int fd) const {
     const ClientConnection &conn = it->second;
     std::string nick = conn.nick.empty() ? "*" : conn.nick;
     std::string user = conn.username.empty() ? "user" : conn.username;
-    return std::string(":") + nick + "!" + user + "@" + kServerName;
+    return std::string(":") + nick + "!" + user + "@" + config_.server_name;
 }
 
 bool PollServer::IsValidChannelName(const std::string &name) const {
@@ -1110,6 +1125,55 @@ std::string PollServer::BuildModeReply(const ChannelState &state) const {
         params += " " + std::to_string(state.user_limit);
     }
     return modes + params;
+}
+
+void PollServer::HandleRehash(int fd) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+
+    std::string error;
+    if (!ReloadConfig(error)) {
+        SendNumeric(fd, "468", nick, config_path_ + " :" + error);
+        return;
+    }
+
+    logger_.Log(config::LogLevel::kInfo, "REHASH 완료: " + config_path_);
+    SendNumeric(fd, "382", nick, config_path_ + " :설정 리로드 완료");
+}
+
+void PollServer::ApplyConfig(const config::Settings &settings) {
+    config_ = settings;
+    logger_.SetLevel(config_.log_level);
+    logger_.SetOutput(config_.log_file);
+}
+
+bool PollServer::ReloadConfig(std::string &error) {
+    config::Settings updated;
+    if (!config::LoadFromFile(config_path_, updated, error)) {
+        return false;
+    }
+    ApplyConfig(updated);
+    return true;
+}
+
+void PollServer::HandlePendingReload() {
+    if (!g_reload_requested) {
+        return;
+    }
+    g_reload_requested = 0;
+
+    std::string error;
+    if (!ReloadConfig(error)) {
+        logger_.Log(config::LogLevel::kWarn, "SIGHUP 리로드 실패: " + error);
+        return;
+    }
+    logger_.Log(config::LogLevel::kInfo,
+                "SIGHUP 리로드 성공: 서버명=" + config_.server_name + " 레벨=" +
+                    config::LogLevelToString(config_.log_level));
 }
 
 std::string PollServer::FormatPayloadForEcho(const std::string &payload) const {

@@ -24,11 +24,29 @@
 ### 2) 수동 빌드/실행
 ```bash
 make
-./modern-irc <port> <password>
+./modern-irc <port> <password> [config_path]
 
 # 예시
 ./modern-irc 6667 testpass
 ```
+
+### 2-1) 설정 파일 예시
+`config/server.ini` 또는 임의 경로를 만들어 `[config_path]`로 넘길 수 있다.
+
+```ini
+[server]
+name=custom-irc
+[logging]
+level=warn
+file=-
+[limits]
+messages_per_5s=0
+```
+
+- `name`: numeric prefix와 사용자 prefix 호스트에 사용된다.
+- `level`: debug/info/warn/error 중 하나.
+- `file`: 로그 출력 경로(비우거나 `-`면 표준 오류).
+- `messages_per_5s`: 아직 제한 로직은 없지만 값을 미리 로드한다.
 
 ### 3) nc로 간단 스모크
 ```bash
@@ -69,6 +87,10 @@ USER user 0 * :Real User
 - 채널 키: `MODE #room +k <key>` 적용 후 JOIN `<channel> <key>`가 아니면 `475`로 거부된다.
 - 인원 제한: `MODE #room +l 1`처럼 제한을 걸면 제한 인원 이후 JOIN 시 `471`이 반환된다.
 - 오퍼레이터 부여/해제: `MODE #room +o <nick>` 또는 `-o <nick>`으로 조정하며, 오퍼레이터가 모두 사라지면 남은 첫 멤버가 자동 승격된다.
+
+### 9) 설정 리로드(REHASH)
+- 서버가 기동된 뒤 설정 파일을 수정했다면 클라이언트에서 `REHASH`를 보내 새 설정을 즉시 반영시킬 수 있다.
+- 성공 시 `382 RPL_REHASHING`, 오류 시 `468 ERR_REHASHFAILED` numeric이 돌아온다.
 
 ---
 

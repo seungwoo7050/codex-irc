@@ -2,7 +2,8 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -Iinclude
 LDFLAGS =
 
-SRC = src/main.cpp src/server.cpp src/protocol/framer.cpp src/protocol/message.cpp
+SRC = src/main.cpp src/server.cpp src/protocol/framer.cpp src/protocol/message.cpp \
+      src/utils/config.cpp src/utils/logger.cpp
 
 all: modern-irc
 
@@ -10,13 +11,14 @@ modern-irc: $(SRC)
 	$(CXX) $(CXXFLAGS) $(SRC) -o $@
 
 clean:
-	rm -f modern-irc tests/unit/framer_test tests/unit/message_test
+	rm -f modern-irc tests/unit/framer_test tests/unit/message_test tests/unit/config_parser_test
 
 .PHONY: all clean test e2e
 
-test: modern-irc tests/unit/framer_test tests/unit/message_test
+test: modern-irc tests/unit/framer_test tests/unit/message_test tests/unit/config_parser_test
 	./tests/unit/framer_test
 	./tests/unit/message_test
+	./tests/unit/config_parser_test
 
 # Unit test binary
 
@@ -24,6 +26,9 @@ tests/unit/framer_test: tests/unit/framer_test.cpp src/protocol/framer.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 tests/unit/message_test: tests/unit/message_test.cpp src/protocol/message.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+tests/unit/config_parser_test: tests/unit/config_parser_test.cpp src/utils/config.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 e2e: modern-irc
