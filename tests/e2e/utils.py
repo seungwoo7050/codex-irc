@@ -1,5 +1,5 @@
 """
-버전: v0.3.0
+버전: v0.5.0
 관련 문서: design/protocol/contract.md
 테스트: tests/e2e
 설명: E2E 테스트를 위한 서버 실행/소켓 유틸리티를 제공한다.
@@ -9,6 +9,9 @@ import os
 import socket
 import subprocess
 import time
+
+
+BUFFERED_DATA = {}
 
 
 def find_free_port():
@@ -54,10 +57,18 @@ def run_server(password="testpass"):
 
 
 def recv_line(sock, limit=4096):
-    data = b""
+    buffered = BUFFERED_DATA.get(sock.fileno(), b"")
+    data = buffered
     while b"\r\n" not in data and len(data) < limit:
         chunk = sock.recv(1024)
         if not chunk:
             break
         data += chunk
+
+    if b"\r\n" in data:
+        line, rest = data.split(b"\r\n", 1)
+        BUFFERED_DATA[sock.fileno()] = rest
+        return line.decode("utf-8", errors="replace").strip("\r\n")
+
+    BUFFERED_DATA[sock.fileno()] = b""
     return data.decode("utf-8", errors="replace").strip("\r\n")

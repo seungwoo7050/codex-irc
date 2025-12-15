@@ -1,6 +1,6 @@
 /*
- * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART와 채널 브로드캐스트를 처리한다.
- * 버전: v0.4.0
+ * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART와 메시징 라우팅을 처리한다.
+ * 버전: v0.5.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
@@ -60,12 +60,17 @@ class PollServer {
     void HandleUser(int fd, const protocol::ParsedMessage &msg);
     void HandleJoin(int fd, const protocol::ParsedMessage &msg);
     void HandlePart(int fd, const protocol::ParsedMessage &msg);
+    void HandlePrivmsgNotice(int fd, const protocol::ParsedMessage &msg, bool notice);
+    void HandleNames(int fd, const protocol::ParsedMessage &msg);
+    void HandleList(int fd, const protocol::ParsedMessage &msg);
     void HandleQuit(int fd);
     void SendNumeric(int fd, const std::string &code, const std::string &target,
                      const std::string &message, bool close_after = false);
     bool NickInUse(const std::string &nick, int requester_fd) const;
+    int FindClientFdByNick(const std::string &nick) const;
     void TryCompleteRegistration(int fd);
-    void BroadcastToChannel(const std::string &channel, const std::string &line);
+    void BroadcastToChannel(const std::string &channel, const std::string &line,
+                            int exclude_fd = -1);
     std::string BuildUserPrefix(int fd) const;
     bool IsValidChannelName(const std::string &name) const;
     void RemoveFromAllChannels(int fd, const std::string &reason);
