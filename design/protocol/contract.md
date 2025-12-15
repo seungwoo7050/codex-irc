@@ -1,16 +1,37 @@
 # design/protocol/contract.md
 
-## 개요 (v0.7.0)
+## 개요 (v0.8.0)
 - 본 문서는 modern-irc 서버의 외부 프로토콜 계약을 정의한다.
-- v0.7.0에서는 MODE로 채널 모드(+i/+t/+k/+o/+l)를 적용/해제하고, 모드별 파라미터 규칙과 JOIN 거부 에러를 고정한다.
+- v0.8.0에서는 INI 설정 파일로 서버명을 포함한 운영 파라미터를 지정하고, REHASH/SIGHUP으로 런타임 리로드 규칙을 고정한다.
 
 ---
 
 ## 연결 및 CLI
-- 실행 방법: `./modern-irc <port> <password>`
+- 실행 방법: `./modern-irc <port> <password> [config_path]`
   - `<port>`: IPv4 TCP 포트 번호.
   - `<password>`: 서버 공유 비밀번호. PASS 명령 검증에 사용한다.
+  - `[config_path]`: 선택적 INI 설정 파일 경로. 생략 시 `config/server.ini`를 사용하며, 파일이 없으면 기본값으로 기동한다.
 - 서버는 IPv4에서 `INADDR_ANY`로 바인드하며, `poll()` 기반 단일 스레드 이벤트 루프로 동작한다.
+
+### 설정 파일 (INI)
+- 섹션/키는 소문자로 고정하며, 공백을 포함하지 않는 `키=값` 형식을 따른다.
+- `#` 또는 `;`로 시작하는 줄은 주석으로 무시한다.
+- 지원 섹션 및 키(기본값 포함):
+  - `[server]`
+    - `name` (기본: `modern-irc`)
+      - numeric prefix와 사용자 prefix의 호스트 부분에 사용된다.
+  - `[logging]`
+    - `level` (기본: `info`, 허용: `debug|info|warn|error`, 대소문자 무시)
+    - `file` (기본: 빈 문자열 → 표준 오류로 출력, `-`도 표준 오류 의미)
+  - `[limits]`
+    - `messages_per_5s` (기본: `0`, 0이면 비활성화) — v0.8.0에서는 **값만 로드**하며, 차후 버전(v0.9.0)에서 실제 레이트리밋에 사용한다.
+- 설정 파일이 없으면 모든 키가 기본값으로 채워진다.
+- 파일이 존재하지만 구문/값이 잘못되면 로드에 실패하며, 실패 시 이전 구성이 유지된다.
+
+### 로깅 규칙
+- 로그 레벨: debug < info < warn < error 순서로 필터링한다.
+- 출력 대상: `logging.file`이 비어 있거나 `-`이면 표준 오류로 기록하며, 경로가 주어지면 append 모드로 파일을 연다.
+- REHASH/SIGHUP으로 로그 레벨·출력 경로가 바뀌면 즉시 새 설정이 적용된다.
 
 ---
 
@@ -86,6 +107,18 @@
 - USER
   - 요청 형식: `USER <username> 0 * :<realname>`
   - 효과: username과 realname을 설정한다. 모드/호스트 필드는 무시한다.
+
+### 설정 리로드 (v0.8.0)
+- **REHASH**
+  - 요청 형식: `REHASH`
+  - 등록 전 호출: `451 ERR_NOTREGISTERED :등록 필요`
+  - 동작: 서버는 기동 시점에 사용한 설정 파일 경로를 다시 읽어 들이고, **성공 시 즉시 새 설정을 적용**한다.
+  - 성공 응답: `382 RPL_REHASHING <path> :설정 리로드 완료`
+    - prefix로 사용되는 서버명은 적용된 새 설정(`server.name`)을 따른다.
+  - 실패 응답: `468 ERR_REHASHFAILED <path> :<사유>` (잘못된 키/값 등)
+- **SIGHUP**
+  - 프로세스가 SIGHUP을 받으면 REHASH와 동일하게 설정을 다시 읽는다.
+  - SIGHUP은 클라이언트 응답 없이 로그만 남긴다.
 
 ---
 
@@ -286,6 +319,10 @@
 - 472 ERR_UNKNOWNMODE – 지원하지 않는 모드 문자
 - 473 ERR_INVITEONLYCHAN – 초대 전용 채널 거부
 - 475 ERR_BADCHANNELKEY – 채널 키 불일치
+
+### v0.8.0에서 사용하는 numeric 추가 목록
+- 382 RPL_REHASHING – REHASH 성공 알림
+- 468 ERR_REHASHFAILED – 설정 파일 재적용 실패
 
 ---
 

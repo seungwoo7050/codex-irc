@@ -1,5 +1,5 @@
 """
-버전: v0.5.0
+버전: v0.8.0
 관련 문서: design/protocol/contract.md
 테스트: tests/e2e
 설명: E2E 테스트를 위한 서버 실행/소켓 유틸리티를 제공한다.
@@ -34,14 +34,16 @@ def wait_for_listen(host, port, timeout=5.0):
 
 
 @contextlib.contextmanager
-def run_server(password="testpass"):
+def run_server(password="testpass", config_path=None):
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     server_path = os.path.join(repo_root, "modern-irc")
     port = find_free_port()
 
-    proc = subprocess.Popen(
-        [server_path, str(port), password], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    cmd = [server_path, str(port), password]
+    if config_path:
+        cmd.append(config_path)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
         if not wait_for_listen("127.0.0.1", port):
