@@ -1,8 +1,8 @@
 # design/protocol/contract.md
 
-## 개요 (v0.4.0)
+## 개요 (v0.5.0)
 - 본 문서는 modern-irc 서버의 외부 프로토콜 계약을 정의한다.
-- v0.4.0은 RFC 스타일 메시지 파싱 규칙, PING/PONG/QUIT 동작, 채널 JOIN/PART 흐름과 브로드캐스트 메시지를 고정한다.
+- v0.5.0은 RFC 스타일 메시지 파싱 규칙, PING/PONG/QUIT 흐름과 채널 JOIN/PART 브로드캐스트에 더해, 사용자/채널 메시징(PRIVMSG/NOTICE)과 채널 정보 조회(NAMES/LIST)를 고정한다.
 
 ---
 
@@ -89,6 +89,47 @@
 
 ---
 
+## 메시징 명령 (v0.5.0)
+- 공통 정책
+  - 등록이 완료되지 않은 클라이언트가 PRIVMSG/NOTICE/NAMES/LIST를 호출하면 `451 ERR_NOTREGISTERED :등록 필요`로 거부한다.
+  - 대상이 채널인 경우 채널 이름 규칙은 JOIN과 동일하게 적용한다.
+
+- PRIVMSG
+  - 문법: `PRIVMSG <target> :<text>`
+  - `<target>`: 닉네임 또는 채널 이름.
+  - `<text>`: 공백 포함 메시지 본문. trailing 파라미터(`:<text>`)를 사용한다.
+  - 오류:
+    - 대상 미지정: 파라미터 없음 시 `411 ERR_NORECIPIENT PRIVMSG :대상 없음`.
+    - 본문 없음: 대상만 있고 본문이 없을 때 `412 ERR_NOTEXTTOSEND :본문 없음`.
+    - 닉네임 대상이 존재하지 않을 때: `401 ERR_NOSUCHNICK <target> :대상 없음`.
+    - 채널 대상이 존재하지 않을 때: `403 ERR_NOSUCHCHANNEL <target> :채널 없음`.
+    - 채널 대상이지만 발신자가 멤버가 아닐 때: `442 ERR_NOTONCHANNEL <target> :채널에 속해 있지 않음`.
+  - 성공 시 동작:
+    - 닉네임 대상: `:<sender> PRIVMSG <target> :<text>`를 대상 사용자에게 전송한다.
+    - 채널 대상: 채널 멤버 전체(발신자 제외)에게 `:<sender> PRIVMSG <channel> :<text>`를 브로드캐스트한다.
+
+- NOTICE
+  - 문법: `NOTICE <target> :<text>` (target은 PRIVMSG와 동일 규칙)
+  - 오류 처리: PRIVMSG와 동일한 조건/ numeric을 사용한다.
+  - 성공 시 동작: PRIVMSG와 동일한 라인 형식(`NOTICE`)으로 전달하며, NOTICE도 채널 브로드캐스트 시 발신자를 제외한다.
+
+- NAMES
+  - 문법: `NAMES <channel>` (한 번에 하나의 채널만 지원)
+  - 오류: 파라미터 없음 시 `461 ERR_NEEDMOREPARAMS NAMES :필수 파라미터 부족`, 채널 이름 규칙 위반 시 `476 ERR_BADCHANMASK <channel> :채널 이름 오류`.
+  - 응답:
+    - 채널이 존재하고 멤버가 있을 때: `:modern-irc 353 <nick> = <channel> :<nick1> <nick2> ...` (닉네임 공백 구분, 순서는 구현체 내부 순서).
+    - 채널이 없으면 빈 목록으로 간주한다(353은 생략 가능).
+    - 종료: `:modern-irc 366 <nick> <channel> :NAMES 종료`.
+
+- LIST
+  - 문법: `LIST` (v0.5.0에서는 파라미터 없는 전체 목록만 지원)
+  - 응답:
+    - 시작: `:modern-irc 321 <nick> Channel :Users Name`.
+    - 각 채널: `:modern-irc 322 <nick> <channel> <usercount> :<topic>` (topic은 아직 없으므로 `-` 고정).
+    - 종료: `:modern-irc 323 <nick> :LIST 종료`.
+
+---
+
 ## 오류 처리 및 numeric replies (v0.3.0)
 - 길이 초과 정책: **라인 길이 512바이트 초과 시 즉시 연결 종료**(드롭/에러 미전송).
 - 송신 큐 초과: 연결 종료.
@@ -152,6 +193,17 @@
 - 442 ERR_NOTONCHANNEL – PART 시 채널 미가입
 - 443 ERR_USERONCHANNEL – JOIN 시 이미 가입
 - 476 ERR_BADCHANMASK – 채널 이름 규칙 위반
+
+### v0.5.0에서 사용하는 numeric 추가 목록
+- 401 ERR_NOSUCHNICK – PRIVMSG/NOTICE 대상 닉네임 없음
+- 403 ERR_NOSUCHCHANNEL – PRIVMSG/NOTICE/NAMES 대상 채널 없음
+- 411 ERR_NORECIPIENT – 대상 파라미터 없음
+- 412 ERR_NOTEXTTOSEND – 본문 없음
+- 321 RPL_LISTSTART – LIST 시작 안내
+- 322 RPL_LIST – 채널 목록 항목
+- 323 RPL_LISTEND – LIST 종료
+- 353 RPL_NAMREPLY – NAMES 결과
+- 366 RPL_ENDOFNAMES – NAMES 종료
 
 ---
 

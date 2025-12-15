@@ -1,6 +1,6 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART 및 기본 에러 응답을 처리한다.
- * 버전: v0.4.0
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징 및 기본 에러 응답을 처리한다.
+ * 버전: v0.5.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
@@ -277,6 +277,22 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
         HandlePart(fd, msg);
         return;
     }
+    if (msg.command == "PRIVMSG") {
+        HandlePrivmsgNotice(fd, msg, false);
+        return;
+    }
+    if (msg.command == "NOTICE") {
+        HandlePrivmsgNotice(fd, msg, true);
+        return;
+    }
+    if (msg.command == "NAMES") {
+        HandleNames(fd, msg);
+        return;
+    }
+    if (msg.command == "LIST") {
+        HandleList(fd, msg);
+        return;
+    }
     if (msg.command == "QUIT") {
         HandleQuit(fd);
         return;
@@ -441,6 +457,113 @@ void PollServer::HandlePart(int fd, const protocol::ParsedMessage &msg) {
     }
 }
 
+void PollServer::HandlePrivmsgNotice(int fd, const protocol::ParsedMessage &msg, bool notice) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "411", nick, msg.command + " :대상 없음");
+        return;
+    }
+    if (msg.params.size() < 2 || msg.params[1].empty()) {
+        SendNumeric(fd, "412", nick, ":본문 없음");
+        return;
+    }
+
+    const std::string &target = msg.params[0];
+    const std::string &text = msg.params[1];
+    const std::string command = notice ? " NOTICE " : " PRIVMSG ";
+
+    if (!target.empty() && target[0] == '#') {
+        if (!IsValidChannelName(target)) {
+            SendNumeric(fd, "403", nick, target + " :채널 없음");
+            return;
+        }
+        std::map<std::string, ChannelState>::iterator it = channels_.find(target);
+        if (it == channels_.end()) {
+            SendNumeric(fd, "403", nick, target + " :채널 없음");
+            return;
+        }
+        if (it->second.members.find(fd) == it->second.members.end()) {
+            SendNumeric(fd, "442", nick, target + " :채널에 속해 있지 않음");
+            return;
+        }
+
+        std::string line = BuildUserPrefix(fd) + command + target + " :" + text;
+        BroadcastToChannel(target, line, fd);
+        return;
+    }
+
+    int target_fd = FindClientFdByNick(target);
+    if (target_fd < 0) {
+        SendNumeric(fd, "401", nick, target + " :대상 없음");
+        return;
+    }
+
+    std::string line = BuildUserPrefix(fd) + command + target + " :" + text;
+    if (!EnqueueResponse(target_fd, line)) {
+        CloseClient(target_fd);
+    }
+}
+
+void PollServer::HandleNames(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "461", nick, "NAMES :필수 파라미터 부족");
+        return;
+    }
+    const std::string &channel = msg.params[0];
+    if (!IsValidChannelName(channel)) {
+        SendNumeric(fd, "476", nick, channel + " :채널 이름 오류");
+        return;
+    }
+
+    std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
+    if (it != channels_.end() && !it->second.members.empty()) {
+        std::string members_line;
+        for (std::set<int>::const_iterator mem_it = it->second.members.begin();
+             mem_it != it->second.members.end(); ++mem_it) {
+            std::map<int, ClientConnection>::const_iterator client_it = clients_.find(*mem_it);
+            if (client_it == clients_.end()) {
+                continue;
+            }
+            if (!members_line.empty()) {
+                members_line += " ";
+            }
+            members_line += client_it->second.nick.empty() ? "*" : client_it->second.nick;
+        }
+        SendNumeric(fd, "353", nick, "= " + channel + " :" + members_line);
+    }
+
+    SendNumeric(fd, "366", nick, channel + " :NAMES 종료");
+}
+
+void PollServer::HandleList(int fd, const protocol::ParsedMessage &msg) {
+    (void)msg;
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+
+    SendNumeric(fd, "321", nick, "Channel :Users Name");
+    for (std::map<std::string, ChannelState>::const_iterator it = channels_.begin();
+         it != channels_.end(); ++it) {
+        const std::string count = std::to_string(it->second.members.size());
+        SendNumeric(fd, "322", nick, it->first + " " + count + " :-");
+    }
+    SendNumeric(fd, "323", nick, ":LIST 종료");
+}
+
 void PollServer::HandleQuit(int fd) { CloseClient(fd); }
 
 void PollServer::SendNumeric(int fd, const std::string &code, const std::string &target,
@@ -468,6 +591,19 @@ bool PollServer::NickInUse(const std::string &nick, int requester_fd) const {
     return false;
 }
 
+int PollServer::FindClientFdByNick(const std::string &nick) const {
+    for (std::map<int, ClientConnection>::const_iterator it = clients_.begin(); it != clients_.end();
+         ++it) {
+        if (!it->second.registered) {
+            continue;
+        }
+        if (it->second.nick == nick) {
+            return it->first;
+        }
+    }
+    return -1;
+}
+
 void PollServer::TryCompleteRegistration(int fd) {
     ClientConnection &conn = clients_[fd];
     if (conn.registered) {
@@ -480,7 +616,8 @@ void PollServer::TryCompleteRegistration(int fd) {
     SendNumeric(fd, "001", conn.nick, ":등록 완료");
 }
 
-void PollServer::BroadcastToChannel(const std::string &channel, const std::string &line) {
+void PollServer::BroadcastToChannel(const std::string &channel, const std::string &line,
+                                    int exclude_fd) {
     std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
     if (it == channels_.end()) {
         return;
@@ -488,6 +625,9 @@ void PollServer::BroadcastToChannel(const std::string &channel, const std::strin
     std::set<int> recipients = it->second.members;
     for (std::set<int>::iterator mem_it = recipients.begin(); mem_it != recipients.end(); ++mem_it) {
         int member_fd = *mem_it;
+        if (exclude_fd >= 0 && member_fd == exclude_fd) {
+            continue;
+        }
         if (clients_.find(member_fd) == clients_.end()) {
             continue;
         }
