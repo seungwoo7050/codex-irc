@@ -1,8 +1,8 @@
 # design/protocol/contract.md
 
-## 개요 (v0.3.0)
+## 개요 (v0.4.0)
 - 본 문서는 modern-irc 서버의 외부 프로토콜 계약을 정의한다.
-- v0.3.0은 RFC 스타일 메시지 파싱 규칙, PING/PONG/QUIT 동작, 최소 에러 세트를 고정한다.
+- v0.4.0은 RFC 스타일 메시지 파싱 규칙, PING/PONG/QUIT 동작, 채널 JOIN/PART 흐름과 브로드캐스트 메시지를 고정한다.
 
 ---
 
@@ -114,6 +114,44 @@
 - 461 ERR_NEEDMOREPARAMS – 필수 파라미터 부족
 - 462 ERR_ALREADYREGISTRED – 이미 등록된 상태에서 PASS/NICK/USER 수행
 - 464 ERR_PASSWDMISMATCH – PASS 비밀번호 불일치
+
+---
+
+## 채널 규칙 및 JOIN/PART (v0.4.0)
+- **채널 이름 규칙**
+  - `#`로 시작해야 한다.
+  - 길이: 2~50자.
+  - 허용 문자: 영문 대소문자, 숫자, `_` `-` (공백/쉼표 없음).
+  - 대소문자를 구분한다.
+
+- **공통 정책**
+  - JOIN/PART는 등록 완료 후에만 허용된다. 등록 전에는 `451 ERR_NOTREGISTERED`로 거부한다.
+  - 한 번에 하나의 채널만 처리한다(쉼표 분리 목록 미지원).
+  - 서버는 채널 멤버십을 추적하며, 퇴장하거나 연결이 종료되면 해당 채널 멤버십을 제거한다.
+
+- **JOIN**
+  - 문법: `JOIN <channel>`
+  - 파라미터 부족: `461 ERR_NEEDMOREPARAMS JOIN :필수 파라미터 부족`
+  - 채널 이름 형식 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
+  - 이미 채널에 있는 경우: `443 ERR_USERONCHANNEL <nick> <channel> :이미 채널에 있음`
+  - 성공 시: 채널이 없으면 생성하고 멤버십을 추가한 뒤 **채널 전체**(자신 포함)에 `:<nick>!<username>@modern-irc JOIN <channel>` 를 브로드캐스트한다.
+
+- **PART**
+  - 문법: `PART <channel> [:<message>]`
+  - 파라미터 부족: `461 ERR_NEEDMOREPARAMS PART :필수 파라미터 부족`
+  - 채널 이름 형식 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
+  - 채널이 없거나 멤버가 아닌 경우: `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`
+  - 성공 시: 채널 구성원 전체(자신 포함)에 `:<nick>!<username>@modern-irc PART <channel> :<message>` 를 브로드캐스트한다.
+    - `<message>`가 없으면 `:사용자 요청`으로 대체한다.
+    - 브로드캐스트 후 멤버십을 제거하며, 채널이 비면 삭제한다.
+
+- **연결 종료/QUIT 시 멤버십 정리**
+  - QUIT 또는 소켓 종료 시, 사용자가 속했던 각 채널에 `:<nick>!<username>@modern-irc PART <channel> :연결 종료`를 브로드캐스트한 뒤 멤버십을 제거한다.
+
+### v0.4.0에서 사용하는 numeric 추가 목록
+- 442 ERR_NOTONCHANNEL – PART 시 채널 미가입
+- 443 ERR_USERONCHANNEL – JOIN 시 이미 가입
+- 476 ERR_BADCHANMASK – 채널 이름 규칙 위반
 
 ---
 
