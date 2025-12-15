@@ -1,8 +1,8 @@
 # design/protocol/contract.md
 
-## 개요 (v0.6.0)
+## 개요 (v0.7.0)
 - 본 문서는 modern-irc 서버의 외부 프로토콜 계약을 정의한다.
-- v0.6.0에서는 채널 관리 명령(TOPIC/KICK/INVITE)과 채널 오퍼레이터 권한 모델(최소 권한 기준)을 고정한다.
+- v0.7.0에서는 MODE로 채널 모드(+i/+t/+k/+o/+l)를 적용/해제하고, 모드별 파라미터 규칙과 JOIN 거부 에러를 고정한다.
 
 ---
 
@@ -158,7 +158,7 @@
 
 ---
 
-## 채널 규칙 및 JOIN/PART (v0.4.0)
+## 채널 규칙 및 JOIN/PART (v0.4.0, v0.7.0 보강)
 - **채널 이름 규칙**
   - `#`로 시작해야 한다.
   - 길이: 2~50자.
@@ -171,10 +171,14 @@
   - 서버는 채널 멤버십을 추적하며, 퇴장하거나 연결이 종료되면 해당 채널 멤버십을 제거한다.
 
 - **JOIN**
-  - 문법: `JOIN <channel>`
+  - 문법: `JOIN <channel> [<key>]`
   - 파라미터 부족: `461 ERR_NEEDMOREPARAMS JOIN :필수 파라미터 부족`
   - 채널 이름 형식 오류: `476 ERR_BADCHANMASK <channel> :채널 이름 오류`
   - 이미 채널에 있는 경우: `443 ERR_USERONCHANNEL <nick> <channel> :이미 채널에 있음`
+  - 모드 기반 거부:
+    - 초대 전용(+i)인데 초대 목록에 없다면 `473 ERR_INVITEONLYCHAN <channel> :초대 전용`
+    - 키(+k)가 설정돼 있고 키가 없거나 불일치하면 `475 ERR_BADCHANNELKEY <channel> :채널 키 불일치`
+    - 인원 제한(+l)에 도달하면 `471 ERR_CHANNELISFULL <channel> :채널 인원 초과`
   - 성공 시: 채널이 없으면 생성하고 멤버십을 추가한 뒤 **채널 전체**(자신 포함)에 `:<nick>!<username>@modern-irc JOIN <channel>` 를 브로드캐스트한다.
 
 - **PART**
@@ -254,6 +258,34 @@
 - 341 RPL_INVITING – INVITE 성공 알림
 - 441 ERR_USERNOTINCHANNEL – KICK 시 대상 미가입
 - 482 ERR_CHANOPRIVSNEEDED – 채널 오퍼레이터 권한 없음
+
+---
+
+## 채널 모드 및 MODE (v0.7.0)
+- **지원 모드**: +i, +t, +k, +o, +l (채널 모드만 지원하며 사용자 모드는 미지원)
+- **문법**: `MODE <channel> [<modestring> [<param1> [<param2> ...]]]`
+  - `<modestring>`은 `+` 또는 `-`로 시작하며 지원 모드 문자만 포함해야 한다. 지원하지 않는 모드 문자는 `472 ERR_UNKNOWNMODE <char> :지원하지 않는 모드`로 거부한다.
+  - `<param*>`는 모드 문자 순서대로 소진한다.
+  - 파라미터가 필요한 모드에 값이 없으면 `461 ERR_NEEDMOREPARAMS MODE :필수 파라미터 부족`으로 거부한다.
+- **호출 권한**
+  - 채널 미가입자는 `442 ERR_NOTONCHANNEL <channel> :채널에 속해 있지 않음`으로 거부한다.
+  - 모드 변경은 채널 오퍼레이터만 가능하며, 그렇지 않으면 `482 ERR_CHANOPRIVSNEEDED <channel> :채널 권한 없음`으로 거부한다.
+  - `<modestring>` 없이 호출하면 현재 모드 상태를 `324 RPL_CHANNELMODEIS <channel> <modes> [<params>]` 형태로 반환한다.
+- **모드별 동작/파라미터**
+  - +i/-i (invite-only): 파라미터 없음. +i 시 초대 목록에 없는 사용자는 JOIN을 거부한다.
+  - +t/-t (topic 보호): 파라미터 없음. +t이면 토픽 변경은 오퍼레이터만 가능하며, -t이면 채널 멤버 누구나 토픽을 설정할 수 있다. 초기 상태는 +t이다.
+  - +k/-k (채널 키): +k는 키 문자열 1개 필수. -k는 파라미터 없이 키를 제거한다. 키가 설정된 채널은 JOIN 시 두 번째 파라미터로 정확한 키를 제시해야 한다.
+  - +o/-o (오퍼레이터 부여/해제): 닉네임 1개 필수. 대상이 채널에 없으면 `441 ERR_USERNOTINCHANNEL <nick> <channel> :대상이 채널에 없음`으로 거부한다. -o로 오퍼레이터를 제거한 뒤 오퍼레이터가 비면 남은 멤버 중 첫 번째를 자동 승격시킨다.
+  - +l/-l (인원 제한): +l은 양의 정수(10진수) 1개 필수. -l은 파라미터 없이 제한을 해제한다. 제한에 도달하면 추가 JOIN은 `471 ERR_CHANNELISFULL`로 거부한다.
+- **브로드캐스트**
+  - 모드가 정상 적용되면 `:<prefix> MODE <channel> <modestring> [params]`를 채널 멤버 전체(호출자 포함)에 브로드캐스트한다.
+
+### v0.7.0에서 사용하는 numeric 추가 목록
+- 324 RPL_CHANNELMODEIS – MODE 조회 응답
+- 471 ERR_CHANNELISFULL – 채널 인원 초과
+- 472 ERR_UNKNOWNMODE – 지원하지 않는 모드 문자
+- 473 ERR_INVITEONLYCHAN – 초대 전용 채널 거부
+- 475 ERR_BADCHANNELKEY – 채널 키 불일치
 
 ---
 

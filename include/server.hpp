@@ -1,7 +1,7 @@
 /*
- * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART와 메시징/채널 관리 라우팅을 처리한다.
- * 버전: v0.6.0
- * 관련 문서: design/protocol/contract.md
+ * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징/채널 관리(TOPIC/KICK/INVITE/MODE) 라우팅을 처리한다.
+ * 버전: v0.7.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
 #pragma once
@@ -37,8 +37,16 @@ struct ChannelState {
     std::set<std::string> invited;
     std::string topic;
     bool has_topic;
+    bool invite_only;
+    bool topic_protected;
+    bool has_key;
+    std::string key;
+    bool has_user_limit;
+    std::size_t user_limit;
 
-    ChannelState() : has_topic(false) {}
+    ChannelState()
+        : has_topic(false), invite_only(false), topic_protected(true), has_key(false),
+          has_user_limit(false), user_limit(0) {}
 };
 
 class PollServer {
@@ -72,6 +80,7 @@ class PollServer {
     void HandleTopic(int fd, const protocol::ParsedMessage &msg);
     void HandleKick(int fd, const protocol::ParsedMessage &msg);
     void HandleInvite(int fd, const protocol::ParsedMessage &msg);
+    void HandleMode(int fd, const protocol::ParsedMessage &msg);
     void HandleQuit(int fd);
     void SendNumeric(int fd, const std::string &code, const std::string &target,
                      const std::string &message, bool close_after = false);
@@ -86,6 +95,8 @@ class PollServer {
     void DetachClientFromChannel(int fd, const std::string &channel);
     void PromoteOperatorIfNeeded(ChannelState &state);
     bool IsChannelOperator(const ChannelState &state, int fd) const;
+    bool ParsePositiveNumber(const std::string &value, std::size_t &out) const;
+    std::string BuildModeReply(const ChannelState &state) const;
 
     int listen_fd_;
     int port_;

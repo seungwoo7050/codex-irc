@@ -1,7 +1,7 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE) 에러 응답을 처리한다.
- * 버전: v0.6.0
- * 관련 문서: design/protocol/contract.md
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징과 채널 관리(TOPIC/KICK/INVITE/MODE) 에러 응답을 처리한다.
+ * 버전: v0.7.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
 #include "server.hpp"
@@ -297,6 +297,10 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
         HandleInvite(fd, msg);
         return;
     }
+    if (msg.command == "MODE") {
+        HandleMode(fd, msg);
+        return;
+    }
     if (msg.command == "NAMES") {
         HandleNames(fd, msg);
         return;
@@ -427,6 +431,25 @@ void PollServer::HandleJoin(int fd, const protocol::ParsedMessage &msg) {
     }
 
     ChannelState &state = channels_[channel];
+    if (!state.members.empty()) {
+        if (state.invite_only && state.invited.find(conn.nick) == state.invited.end()) {
+            SendNumeric(fd, "473", conn.nick.empty() ? "*" : conn.nick,
+                        channel + " :초대 전용");
+            return;
+        }
+        if (state.has_key) {
+            if (msg.params.size() < 2 || msg.params[1] != state.key) {
+                SendNumeric(fd, "475", conn.nick.empty() ? "*" : conn.nick,
+                            channel + " :채널 키 불일치");
+                return;
+            }
+        }
+        if (state.has_user_limit && state.members.size() >= state.user_limit) {
+            SendNumeric(fd, "471", conn.nick.empty() ? "*" : conn.nick,
+                        channel + " :채널 인원 초과");
+            return;
+        }
+    }
     bool was_empty = state.members.empty();
     state.members.insert(fd);
     state.invited.erase(conn.nick);
@@ -614,7 +637,7 @@ void PollServer::HandleTopic(int fd, const protocol::ParsedMessage &msg) {
         return;
     }
 
-    if (!IsChannelOperator(state, fd)) {
+    if (state.topic_protected && !IsChannelOperator(state, fd)) {
         SendNumeric(fd, "482", nick, channel + " :채널 권한 없음");
         return;
     }
@@ -717,6 +740,152 @@ void PollServer::HandleInvite(int fd, const protocol::ParsedMessage &msg) {
     if (!EnqueueResponse(target_fd, line)) {
         CloseClient(target_fd);
     }
+}
+
+void PollServer::HandleMode(int fd, const protocol::ParsedMessage &msg) {
+    ClientConnection &conn = clients_[fd];
+    const std::string nick = conn.nick.empty() ? "*" : conn.nick;
+    if (!conn.registered) {
+        SendNumeric(fd, "451", nick, ":등록 필요");
+        return;
+    }
+    if (msg.params.empty()) {
+        SendNumeric(fd, "461", nick, "MODE :필수 파라미터 부족");
+        return;
+    }
+    const std::string &channel = msg.params[0];
+    if (!IsValidChannelName(channel)) {
+        SendNumeric(fd, "476", nick, channel + " :채널 이름 오류");
+        return;
+    }
+    std::map<std::string, ChannelState>::iterator it = channels_.find(channel);
+    if (it == channels_.end()) {
+        SendNumeric(fd, "403", nick, channel + " :채널 없음");
+        return;
+    }
+    ChannelState &state = it->second;
+    if (state.members.find(fd) == state.members.end()) {
+        SendNumeric(fd, "442", nick, channel + " :채널에 속해 있지 않음");
+        return;
+    }
+
+    if (msg.params.size() == 1) {
+        SendNumeric(fd, "324", nick, channel + " " + BuildModeReply(state));
+        return;
+    }
+
+    if (!IsChannelOperator(state, fd)) {
+        SendNumeric(fd, "482", nick, channel + " :채널 권한 없음");
+        return;
+    }
+
+    const std::string &mode_tokens = msg.params[1];
+    bool add = true;
+    char last_appended_sign = '\0';
+    std::string applied;
+    std::vector<std::string> applied_params;
+    std::size_t param_index = 2;
+
+    for (std::size_t i = 0; i < mode_tokens.size(); ++i) {
+        char c = mode_tokens[i];
+        if (c == '+' || c == '-') {
+            add = (c == '+');
+            continue;
+        }
+        char sign_char = add ? '+' : '-';
+        if (last_appended_sign != sign_char) {
+            applied.push_back(sign_char);
+            last_appended_sign = sign_char;
+        }
+
+        switch (c) {
+            case 'i':
+                state.invite_only = add;
+                applied.push_back('i');
+                break;
+            case 't':
+                state.topic_protected = add;
+                applied.push_back('t');
+                break;
+            case 'k':
+                if (add) {
+                    if (param_index >= msg.params.size()) {
+                        SendNumeric(fd, "461", nick, "MODE :필수 파라미터 부족");
+                        return;
+                    }
+                    state.has_key = true;
+                    state.key = msg.params[param_index++];
+                    applied.push_back('k');
+                    applied_params.push_back(state.key);
+                } else {
+                    state.has_key = false;
+                    state.key.clear();
+                    applied.push_back('k');
+                }
+                break;
+            case 'o': {
+                if (param_index >= msg.params.size()) {
+                    SendNumeric(fd, "461", nick, "MODE :필수 파라미터 부족");
+                    return;
+                }
+                const std::string &target_nick = msg.params[param_index++];
+                int target_fd = FindClientFdByNick(target_nick);
+                if (target_fd < 0) {
+                    SendNumeric(fd, "401", nick, target_nick + " :대상 없음");
+                    return;
+                }
+                if (state.members.find(target_fd) == state.members.end()) {
+                    SendNumeric(fd, "441", nick,
+                                target_nick + " " + channel + " :대상이 채널에 없음");
+                    return;
+                }
+                if (add) {
+                    state.operators.insert(target_fd);
+                } else {
+                    state.operators.erase(target_fd);
+                    PromoteOperatorIfNeeded(state);
+                }
+                applied.push_back('o');
+                applied_params.push_back(target_nick);
+                break;
+            }
+            case 'l':
+                if (add) {
+                    if (param_index >= msg.params.size()) {
+                        SendNumeric(fd, "461", nick, "MODE :필수 파라미터 부족");
+                        return;
+                    }
+                    std::size_t limit = 0;
+                    if (!ParsePositiveNumber(msg.params[param_index], limit)) {
+                        SendNumeric(fd, "461", nick, "MODE :필수 파라미터 부족");
+                        return;
+                    }
+                    ++param_index;
+                    state.has_user_limit = true;
+                    state.user_limit = limit;
+                    applied.push_back('l');
+                    applied_params.push_back(std::to_string(limit));
+                } else {
+                    state.has_user_limit = false;
+                    state.user_limit = 0;
+                    applied.push_back('l');
+                }
+                break;
+            default:
+                SendNumeric(fd, "472", nick, std::string(1, c) + " :지원하지 않는 모드");
+                return;
+        }
+    }
+
+    if (applied.empty()) {
+        return;
+    }
+
+    std::string line = BuildUserPrefix(fd) + " MODE " + channel + " " + applied;
+    for (std::size_t i = 0; i < applied_params.size(); ++i) {
+        line += " " + applied_params[i];
+    }
+    BroadcastToChannel(channel, line);
 }
 
 void PollServer::HandleQuit(int fd) { CloseClient(fd); }
@@ -897,6 +1066,50 @@ void PollServer::PromoteOperatorIfNeeded(ChannelState &state) {
 
 bool PollServer::IsChannelOperator(const ChannelState &state, int fd) const {
     return state.operators.find(fd) != state.operators.end();
+}
+
+bool PollServer::ParsePositiveNumber(const std::string &value, std::size_t &out) const {
+    if (value.empty()) {
+        return false;
+    }
+    std::size_t result = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(value[i]);
+        if (!std::isdigit(c)) {
+            return false;
+        }
+        result = result * 10 + static_cast<std::size_t>(c - '0');
+    }
+    if (result == 0) {
+        return false;
+    }
+    out = result;
+    return true;
+}
+
+std::string PollServer::BuildModeReply(const ChannelState &state) const {
+    std::string modes = "+";
+    if (state.invite_only) {
+        modes += "i";
+    }
+    if (state.topic_protected) {
+        modes += "t";
+    }
+    if (state.has_key) {
+        modes += "k";
+    }
+    if (state.has_user_limit) {
+        modes += "l";
+    }
+
+    std::string params;
+    if (state.has_key) {
+        params += " " + state.key;
+    }
+    if (state.has_user_limit) {
+        params += " " + std::to_string(state.user_limit);
+    }
+    return modes + params;
 }
 
 std::string PollServer::FormatPayloadForEcho(const std::string &payload) const {
