@@ -1,8 +1,8 @@
 /*
- * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징/채널 관리(TOPIC/KICK/INVITE/MODE) 라우팅을 처리한다.
- * 버전: v0.7.0
- * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md
- * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
+ * 설명: poll 기반 TCP 서버로 등록 절차, PING/PONG/QUIT, JOIN/PART, 메시징/채널 관리(TOPIC/KICK/INVITE/MODE) 라우팅과 설정 리로드를 처리한다.
+ * 버전: v0.8.0
+ * 관련 문서: design/protocol/contract.md, design/server/v0.7.0-modes.md, design/server/v0.8.0-config-logging.md
+ * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/unit/config_parser_test.cpp, tests/e2e
  */
 #pragma once
 
@@ -15,6 +15,8 @@
 
 #include "protocol/framer.hpp"
 #include "protocol/message.hpp"
+#include "utils/config.hpp"
+#include "utils/logger.hpp"
 
 struct ClientConnection {
     int fd;
@@ -51,7 +53,8 @@ struct ChannelState {
 
 class PollServer {
    public:
-    PollServer(int port, const std::string &password);
+    PollServer(int port, const std::string &password, const config::Settings &settings,
+               const std::string &config_path);
     void Run();
 
    private:
@@ -81,6 +84,7 @@ class PollServer {
     void HandleKick(int fd, const protocol::ParsedMessage &msg);
     void HandleInvite(int fd, const protocol::ParsedMessage &msg);
     void HandleMode(int fd, const protocol::ParsedMessage &msg);
+    void HandleRehash(int fd);
     void HandleQuit(int fd);
     void SendNumeric(int fd, const std::string &code, const std::string &target,
                      const std::string &message, bool close_after = false);
@@ -97,6 +101,9 @@ class PollServer {
     bool IsChannelOperator(const ChannelState &state, int fd) const;
     bool ParsePositiveNumber(const std::string &value, std::size_t &out) const;
     std::string BuildModeReply(const ChannelState &state) const;
+    void ApplyConfig(const config::Settings &settings);
+    bool ReloadConfig(std::string &error);
+    void HandlePendingReload();
 
     int listen_fd_;
     int port_;
@@ -104,6 +111,10 @@ class PollServer {
     std::vector<struct pollfd> poll_fds_;
     std::map<int, ClientConnection> clients_;
     std::map<std::string, ChannelState> channels_;
+
+    config::Settings config_;
+    std::string config_path_;
+    Logger logger_;
 
     std::string FormatPayloadForEcho(const std::string &payload) const;
 };
