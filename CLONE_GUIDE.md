@@ -46,6 +46,11 @@ USER user 0 * :Real User
 ```
 - 순서와 무관하게 PASS/NICK/USER를 모두 보내면 `:modern-irc 001 hero :등록 완료` 응답이 돌아오면 성공이다.
 
+### 5) 채널 입장/퇴장 스모크
+- 터미널 A에서 등록 후 `JOIN #room`을 보내면 `JOIN #room` 알림이 돌아온다.
+- 터미널 B에서 같은 채널에 JOIN 하면 터미널 A/B 모두 `JOIN #room` 알림을 받는다.
+- 터미널 A에서 `PART #room :bye`를 보내면 터미널 B에서 `PART #room` 브로드캐스트를 받은 뒤, 이후 새 사용자가 JOIN해도 터미널 A는 더 이상 채널 알림을 받지 않는다.
+
 ---
 
 ## 테스트 실행
