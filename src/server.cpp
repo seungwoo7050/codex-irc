@@ -1,6 +1,6 @@
 /*
- * 설명: poll 기반 TCP 서버를 구성하고 등록 절차 및 PING을 처리한다.
- * 버전: v0.2.0
+ * 설명: poll 기반 TCP 서버를 구성하고 등록 절차, PING/PONG/QUIT, 기본 에러 응답을 처리한다.
+ * 버전: v0.3.0
  * 관련 문서: design/protocol/contract.md
  * 테스트: tests/unit/framer_test.cpp, tests/unit/message_test.cpp, tests/e2e
  */
@@ -252,6 +252,10 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
         HandlePing(fd, msg);
         return;
     }
+    if (msg.command == "PONG") {
+        HandlePong(fd, msg);
+        return;
+    }
     if (msg.command == "PASS") {
         HandlePass(fd, msg);
         return;
@@ -274,19 +278,28 @@ void PollServer::HandleCommand(int fd, const protocol::ParsedMessage &msg) {
                     ":등록 필요");
         return;
     }
+
+    SendNumeric(fd, "421", clients_[fd].nick, msg.command + " :알 수 없는 명령");
 }
 
 void PollServer::HandlePing(int fd, const protocol::ParsedMessage &msg) {
-    std::string payload;
-    if (!msg.params.empty()) {
-        payload = msg.params[0];
+    if (msg.params.empty()) {
+        SendNumeric(fd, "409", clients_[fd].nick.empty() ? "*" : clients_[fd].nick,
+                    ":출처 없음");
+        return;
     }
-    std::string response = "PONG";
-    if (!payload.empty()) {
-        response += " " + payload;
-    }
+
+    std::string response = "PONG" + FormatPayloadForEcho(msg.params[0]);
     if (!EnqueueResponse(fd, response)) {
         CloseClient(fd);
+    }
+}
+
+void PollServer::HandlePong(int fd, const protocol::ParsedMessage &msg) {
+    if (msg.params.empty()) {
+        SendNumeric(fd, "409", clients_[fd].nick.empty() ? "*" : clients_[fd].nick,
+                    ":출처 없음");
+        return;
     }
 }
 
@@ -313,7 +326,7 @@ void PollServer::HandlePass(int fd, const protocol::ParsedMessage &msg) {
 void PollServer::HandleNick(int fd, const protocol::ParsedMessage &msg) {
     ClientConnection &conn = clients_[fd];
     if (conn.registered) {
-        SendNumeric(fd, "462", conn.nick.empty() ? "*" : conn.nick, "이미 등록됨");
+        SendNumeric(fd, "462", conn.nick.empty() ? "*" : conn.nick, ":이미 등록됨");
         return;
     }
     if (msg.params.empty()) {
@@ -413,5 +426,17 @@ void PollServer::UpdatePollWriteInterest(int fd) {
             return;
         }
     }
+}
+
+std::string PollServer::FormatPayloadForEcho(const std::string &payload) const {
+    if (payload.empty()) {
+        return "";
+    }
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        if (payload[i] == ' ') {
+            return " :" + payload;
+        }
+    }
+    return " " + payload;
 }
 

@@ -1,5 +1,5 @@
 """
-버전: v0.2.0
+버전: v0.3.0
 관련 문서: design/protocol/contract.md
 테스트: tests/e2e
 설명: E2E 테스트를 위한 서버 실행/소켓 유틸리티를 제공한다.
@@ -51,3 +51,13 @@ def run_server(password="testpass"):
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def recv_line(sock, limit=4096):
+    data = b""
+    while b"\r\n" not in data and len(data) < limit:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode("utf-8", errors="replace").strip("\r\n")

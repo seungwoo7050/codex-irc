@@ -1,5 +1,5 @@
 """
-버전: v0.2.0
+버전: v0.3.0
 관련 문서: design/protocol/contract.md
 테스트: 이 파일 자체
 설명: PASS/NICK/USER 등록 절차와 사전 거부 정책을 검증한다.
@@ -7,17 +7,7 @@
 import socket
 import unittest
 
-from .utils import run_server
-
-
-def recv_line(sock):
-    data = b""
-    while b"\r\n" not in data:
-        chunk = sock.recv(1024)
-        if not chunk:
-            break
-        data += chunk
-    return data.decode("utf-8", errors="replace").strip("\r\n")
+from .utils import recv_line, run_server
 
 
 class RegistrationTest(unittest.TestCase):
